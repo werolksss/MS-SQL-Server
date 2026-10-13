@@ -1,0 +1,586 @@
+using System.Data.Common;
+using System.Diagnostics;
+using System.Globalization;
+using System.Text;
+using System.Text.Json;
+using Microsoft.Data.SqlClient;
+using Microsoft.Data.Sqlite;
+
+internal static class Program
+{
+    static Settings settings = new();
+    static Database current = new();
+    static string password = "";
+
+    static async Task Main()
+    {
+        Console.OutputEncoding = Encoding.UTF8;
+        Console.InputEncoding = Encoding.UTF8;
+
+        DbProviderFactories.RegisterFactory(
+            "Microsoft.Data.SqlClient", SqlClientFactory.Instance);
+
+        DbProviderFactories.RegisterFactory(
+            "Microsoft.Data.Sqlite", SqliteFactory.Instance);
+
+        try
+        {
+            string path = Path.Combine(
+                AppContext.BaseDirectory, "appsettings.json");
+
+            settings = JsonSerializer.Deserialize<Settings>(
+                await File.ReadAllTextAsync(path))
+                ?? throw new Exception("Не удалось прочитать настройки.");
+
+            current = settings.Databases.First(
+                d => d.Name == settings.DefaultDatabase);
+
+            await PrepareSqlite();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("Ошибка запуска: " + ex.Message);
+            return;
+        }
+
+        while (true)
+        {
+            Console.WriteLine($"""
+
+                Оценки студентов
+                СУБД: {current.Name}
+                1. Проверить подключение
+                2. Все студенты
+                3. ФИО студентов
+                4. Средние оценки
+                5. Студенты с оценкой выше указанной
+                6. Минимальная и максимальная средняя оценка
+                7. Студенты выбранной группы
+                8. Предметы с минимальными оценками
+                9. Предметы с максимальными оценками
+                10. Количество студентов в каждой группе
+                11. Добавить студента
+                12. Изменить студента
+                13. Удалить студента
+                14. Сменить СУБД
+                15. Список провайдеров
+                0. Выход
+                """);
+
+            Console.Write("Выбор: ");
+            string choice = Console.ReadLine()?.Trim() ?? "";
+
+            if (choice == "0")
+                return;
+
+            try
+            {
+                switch (choice)
+                {
+                    case "1":
+                        await Show("SELECT 1 AS ConnectionOK;");
+                        Console.WriteLine("Подключение успешно.");
+                        break;
+
+                    case "2":
+                        await Show("SELECT * FROM Students ORDER BY Id;");
+                        break;
+
+                    case "3":
+                        await Show(
+                            "SELECT FullName FROM Students ORDER BY FullName;");
+                        break;
+
+                    case "4":
+                        await Show("""
+                            SELECT FullName, AverageGrade
+                            FROM Students ORDER BY FullName;
+                            """);
+                        break;
+
+                    case "5":
+                        await Show("""
+                            SELECT * FROM Students
+                            WHERE AverageGrade > @grade
+                            ORDER BY AverageGrade DESC;
+                            """, ("@grade", ReadGrade()));
+                        break;
+
+                    case "6":
+                        await Show("""
+                            SELECT
+                                MIN(AverageGrade) AS Minimum,
+                                MAX(AverageGrade) AS Maximum,
+                                AVG(AverageGrade) AS Average
+                            FROM Students;
+                            """);
+                        break;
+
+                    case "7":
+                        await Show("""
+                            SELECT * FROM Students
+                            WHERE GroupName = @group
+                            ORDER BY FullName;
+                            """, ("@group", Text("Группа: ")));
+                        break;
+
+                    case "8":
+                        await Show("""
+                            SELECT FullName, MinSubject
+                            FROM Students ORDER BY FullName;
+                            """);
+                        break;
+
+                    case "9":
+                        await Show("""
+                            SELECT FullName, MaxSubject
+                            FROM Students ORDER BY FullName;
+                            """);
+                        break;
+
+                    case "10":
+                        await Show("""
+                            SELECT GroupName, COUNT(*) AS Amount
+                            FROM Students
+                            GROUP BY GroupName ORDER BY GroupName;
+                            """);
+                        break;
+
+                    case "11":
+                        await SaveStudent(false);
+                        break;
+
+                    case "12":
+                        await SaveStudent(true);
+                        break;
+
+                    case "13":
+                        await DeleteStudent();
+                        break;
+
+                    case "14":
+                        await ChangeDatabase();
+                        break;
+
+                    case "15":
+                        foreach (string provider in
+                            DbProviderFactories.GetProviderInvariantNames())
+                        {
+                            Console.WriteLine(provider);
+                        }
+                        break;
+
+                    default:
+                        Console.WriteLine("Такого пункта нет.");
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Ошибка: " + ex.Message);
+            }
+
+            Console.Write("\nНажми Enter для возврата в меню...");
+            Console.ReadLine();
+        }
+    }
+
+    static DbProviderFactory Factory()
+    {
+        return DbProviderFactories.GetFactory(current.Provider);
+    }
+
+    static DbConnection Connection()
+    {
+        DbProviderFactory factory = Factory();
+
+        DbConnection connection = factory.CreateConnection()
+            ?? throw new Exception("Не удалось создать подключение.");
+
+        DbConnectionStringBuilder builder =
+            factory.CreateConnectionStringBuilder()
+            ?? throw new Exception("Не удалось создать строку подключения.");
+
+        builder.ConnectionString = current.ConnectionString;
+
+        if (current.Provider == "Microsoft.Data.SqlClient")
+        {
+            if (password.Length == 0)
+            {
+                Console.Write("Пароль SQL Server: ");
+                password = ReadPassword();
+            }
+
+            builder["Password"] = password;
+        }
+
+        connection.ConnectionString = builder.ConnectionString;
+        return connection;
+    }
+    static DbCommand Command(
+        DbConnection connection,
+        string sql,
+        params (string Name, object Value)[] parameters)
+    {
+        DbProviderFactory factory = Factory();
+
+        DbCommand command = factory.CreateCommand()
+            ?? throw new Exception("Не удалось создать команду.");
+
+        command.Connection = connection;
+        command.CommandText = sql;
+
+        foreach (var item in parameters)
+        {
+            DbParameter parameter = factory.CreateParameter()
+                ?? throw new Exception("Не удалось создать параметр.");
+
+            parameter.ParameterName = item.Name;
+            parameter.Value = item.Value;
+            command.Parameters.Add(parameter);
+        }
+
+        return command;
+    }
+
+    // Асинхронное чтение.
+    static async Task Show(
+        string sql,
+        params (string Name, object Value)[] parameters)
+    {
+        await using DbConnection connection = Connection();
+        await connection.OpenAsync();
+
+        await using DbCommand command =
+            Command(connection, sql, parameters);
+
+        var rows = new List<string[]>();
+        string[] headers;
+
+        Stopwatch timer = Stopwatch.StartNew();
+
+        await using (DbDataReader reader =
+            await command.ExecuteReaderAsync())
+        {
+            headers = Enumerable.Range(0, reader.FieldCount)
+                .Select(reader.GetName).ToArray();
+
+            while (await reader.ReadAsync())
+            {
+                var row = new string[reader.FieldCount];
+
+                for (int i = 0; i < reader.FieldCount; i++)
+                {
+                    row[i] = reader.IsDBNull(i)
+                        ? "NULL"
+                        : Convert.ToString(
+                            reader.GetValue(i),
+                            CultureInfo.InvariantCulture) ?? "";
+                }
+
+                rows.Add(row);
+            }
+        }
+
+        timer.Stop();
+        PrintTable(headers, rows);
+        Console.WriteLine($"Количество строк: {rows.Count}");
+        PrintTime(timer);
+    }
+
+    // Асинхронное выполнение INSERT, UPDATE и DELETE
+    static async Task<int> Execute(
+        string sql,
+        params (string Name, object Value)[] parameters)
+    {
+        await using DbConnection connection = Connection();
+        await connection.OpenAsync();
+
+        await using DbCommand command =
+            Command(connection, sql, parameters);
+
+        Stopwatch timer = Stopwatch.StartNew();
+        int count = await command.ExecuteNonQueryAsync();
+        timer.Stop();
+
+        Console.WriteLine($"Изменено строк: {count}");
+        PrintTime(timer);
+        return count;
+    }
+
+    static async Task SaveStudent(bool update)
+    {
+        int id = 0;
+
+        if (update)
+        {
+            await Show("SELECT * FROM Students ORDER BY Id;");
+            id = ReadId();
+        }
+
+        string name = Text("ФИО: ");
+        string group = Text("Группа: ");
+        double grade = ReadGrade();
+        string min = Text("Предмет с минимальной оценкой: ");
+        string max = Text("Предмет с максимальной оценкой: ");
+
+        string sql = update
+            ? """
+                UPDATE Students
+                SET FullName = @name,
+                    GroupName = @group,
+                    AverageGrade = @grade,
+                    MinSubject = @min,
+                    MaxSubject = @max
+                WHERE Id = @id;
+                """
+            : """
+                INSERT INTO Students
+                    (FullName, GroupName, AverageGrade,
+                     MinSubject, MaxSubject)
+                VALUES (@name, @group, @grade, @min, @max);
+                """;
+
+        var parameters = new List<(string Name, object Value)>
+        {
+            ("@name", name),
+            ("@group", group),
+            ("@grade", grade),
+            ("@min", min),
+            ("@max", max)
+        };
+
+        if (update)
+            parameters.Add(("@id", id));
+
+        int count = await Execute(sql, parameters.ToArray());
+
+        Console.WriteLine(count == 0
+            ? "Студент с таким ID не найден."
+            : update ? "Студент обновлён." : "Студент добавлен.");
+    }
+
+    static async Task DeleteStudent()
+    {
+        await Show("SELECT * FROM Students ORDER BY Id;");
+        int id = ReadId();
+
+        Console.Write("Для подтверждения удаления введи да: ");
+
+        if (!string.Equals(
+            Console.ReadLine()?.Trim(),
+            "да", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine("Удаление отменено.");
+            return;
+        }
+
+        int count = await Execute(
+            "DELETE FROM Students WHERE Id = @id;",
+            ("@id", id));
+
+        Console.WriteLine(count == 0
+            ? "Студент с таким ID не найден."
+            : "Студент удалён.");
+    }
+
+    static async Task ChangeDatabase()
+    {
+        for (int i = 0; i < settings.Databases.Count; i++)
+            Console.WriteLine($"{i + 1}. {settings.Databases[i].Name}");
+
+        Console.Write("Номер СУБД: ");
+
+        if (!int.TryParse(Console.ReadLine(), out int number)
+            || number < 1 || number > settings.Databases.Count)
+        {
+            throw new Exception("Неверный номер СУБД.");
+        }
+
+        Database previous = current;
+        current = settings.Databases[number - 1];
+
+        try
+        {
+            await Show("SELECT 1 AS ConnectionOK;");
+            Console.WriteLine($"Выбрана СУБД: {current.Name}");
+        }
+        catch
+        {
+            current = previous;
+            password = "";
+            Console.WriteLine(
+                $"Переключение не удалось. Осталась: {current.Name}");
+            throw;
+        }
+    }
+
+    static async Task PrepareSqlite()
+    {
+        Database sqlite = settings.Databases.First(
+            d => d.Provider == "Microsoft.Data.Sqlite");
+
+        var builder = new SqliteConnectionStringBuilder(
+            sqlite.ConnectionString);
+
+        if (File.Exists(builder.DataSource))
+            return;
+
+        Database previous = current;
+        current = sqlite;
+
+        try
+        {
+            await Execute("""
+                CREATE TABLE Students
+                (
+                    Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    FullName NVARCHAR(150) NOT NULL,
+                    GroupName NVARCHAR(50) NOT NULL,
+                    AverageGrade FLOAT NOT NULL
+                        CHECK (AverageGrade BETWEEN 0 AND 12),
+                    MinSubject NVARCHAR(100) NOT NULL,
+                    MaxSubject NVARCHAR(100) NOT NULL
+                );
+
+                INSERT INTO Students
+                    (FullName, GroupName, AverageGrade,
+                     MinSubject, MaxSubject)
+                VALUES
+                    ('Иванов Иван Иванович', 'П-21', 8.5,
+                     'Математика', 'Программирование'),
+                    ('Петрова Анна Сергеевна', 'П-21', 10.2,
+                     'История', 'Математика'),
+                    ('Сидоров Максим Олегович', 'П-22', 6.8,
+                     'Английский язык', 'Физика'),
+                    ('Смирнова Мария Андреевна', 'П-22', 11.0,
+                     'Физика', 'Программирование'),
+                    ('Кузнецов Алексей Дмитриевич', 'П-23', 7.4,
+                     'Математика', 'История'),
+                    ('Волкова Елена Игоревна', 'П-23', 9.3,
+                     'История', 'Английский язык');
+                """);
+
+            Console.WriteLine("База SQLite создана.");
+        }
+        finally
+        {
+            current = previous;
+        }
+    }
+
+    static void PrintTable(string[] headers, List<string[]> rows)
+    {
+        int[] widths = headers.Select(h => h.Length).ToArray();
+
+        foreach (string[] row in rows)
+            for (int i = 0; i < row.Length; i++)
+                widths[i] = Math.Max(widths[i], row[i].Length);
+
+        void PrintRow(string[] row)
+        {
+            Console.WriteLine(string.Join(" | ",
+                row.Select((value, i) => value.PadRight(widths[i]))));
+        }
+
+        PrintRow(headers);
+
+        Console.WriteLine(string.Join("-+-",
+            widths.Select(w => new string('-', w))));
+
+        foreach (string[] row in rows)
+            PrintRow(row);
+    }
+
+    static void PrintTime(Stopwatch timer)
+    {
+        Console.WriteLine(
+            $"Время выполнения запроса: " +
+            $"{timer.Elapsed.TotalSeconds:F6} сек.");
+    }
+
+    static string Text(string prompt)
+    {
+        while (true)
+        {
+            Console.Write(prompt);
+            string value = Console.ReadLine()?.Trim() ?? "";
+
+            if (value.Length > 0)
+                return value;
+
+            Console.WriteLine("Значение не должно быть пустым.");
+        }
+    }
+
+    static int ReadId()
+    {
+        while (true)
+        {
+            Console.Write("ID студента: ");
+
+            if (int.TryParse(Console.ReadLine(), out int id) && id > 0)
+                return id;
+
+            Console.WriteLine("Введи целое положительное число.");
+        }
+    }
+
+    static double ReadGrade()
+    {
+        while (true)
+        {
+            Console.Write("Средняя оценка от 0 до 12: ");
+            string text = (Console.ReadLine() ?? "").Replace(',', '.');
+
+            if (double.TryParse(
+                text,
+                NumberStyles.AllowDecimalPoint,
+                CultureInfo.InvariantCulture,
+                out double grade) && grade >= 0 && grade <= 12)
+            {
+                return grade;
+            }
+
+            Console.WriteLine("Например: 8.5 или 8,5.");
+        }
+    }
+
+    static string ReadPassword()
+    {
+        var result = new StringBuilder();
+
+        while (true)
+        {
+            ConsoleKeyInfo key = Console.ReadKey(true);
+
+            if (key.Key == ConsoleKey.Enter)
+            {
+                Console.WriteLine();
+                return result.ToString();
+            }
+
+            if (key.Key == ConsoleKey.Backspace)
+            {
+                if (result.Length > 0)
+                    result.Length--;
+            }
+            else if (!char.IsControl(key.KeyChar))
+            {
+                result.Append(key.KeyChar);
+            }
+        }
+    }
+}
+
+internal sealed class Settings
+{
+    public string DefaultDatabase { get; set; } = "SQLite";
+    public List<Database> Databases { get; set; } = new();
+}
+
+internal sealed class Database
+{
+    public string Provider { get; set; } = "";
+    public string ConnectionString { get; set; } = "";
+}
