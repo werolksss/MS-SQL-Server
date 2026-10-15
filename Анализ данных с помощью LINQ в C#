@@ -1,0 +1,203 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Text;
+using System.Xml.Linq;
+
+public class Student
+{
+    public string Name { get; set; } = "";
+    public string Group { get; set; } = "";
+    public int Age { get; set; }
+    public double GPA { get; set; }
+    public int PassedCredits { get; set; }
+
+    public override string ToString()
+    {
+        return $"{Name,-10} | {Group,-6} | {Age,7} | {GPA,4:F1} | {PassedCredits,6}";
+    }
+}
+
+class Program
+{
+    private static List<Student> GetStudents()
+    {
+        return new List<Student>
+        {
+            new Student
+            {
+                Name = "Алексей", Group = "ИТ-41", Age = 20,
+                GPA = 4.2, PassedCredits = 40
+            },
+            new Student
+            {
+                Name = "Борис", Group = "ИТ-41", Age = 19,
+                GPA = 3.1, PassedCredits = 35
+            },
+            new Student
+            {
+                Name = "Виктория", Group = "ПИ-42", Age = 21,
+                GPA = 4.8, PassedCredits = 45
+            },
+            new Student
+            {
+                Name = "Григорий", Group = "ИБ-43", Age = 20,
+                GPA = 2.9, PassedCredits = 20
+            },
+            new Student
+            {
+                Name = "Дарья", Group = "ИТ-41", Age = 22,
+                GPA = 4.5, PassedCredits = 42
+            },
+            new Student
+            {
+                Name = "Елена", Group = "ПИ-42", Age = 20,
+                GPA = 3.8, PassedCredits = 38
+            },
+            new Student
+            {
+                Name = "Жанна", Group = "ИБ-43", Age = 23,
+                GPA = 4.9, PassedCredits = 48
+            },
+            new Student
+            {
+                Name = "Игорь", Group = "ИТ-41", Age = 19,
+                GPA = 2.5, PassedCredits = 15
+            }
+        };
+    }
+
+    static void Main()
+    {
+        Console.OutputEncoding = Encoding.UTF8;
+        CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
+
+        Task1_QuerySyntax();
+        Task2_MethodSyntax();
+        Task3_Aggregation();
+        Task4_Xml();
+
+        Console.WriteLine("\nНажмите Enter для выхода...");
+        Console.ReadLine();
+    }
+
+    // Задание 1. Синтаксис запросов.
+    static void Task1_QuerySyntax()
+    {
+        List<Student> students = GetStudents();
+
+        var result =
+            from student in students
+            where student.Group == "ИТ-41" && student.GPA > 3.5
+            orderby student.Age
+            select student;
+
+        Console.WriteLine("Задание 1. Студенты ИТ-41 с баллом > 3.5");
+
+        Console.WriteLine("Имя        | Группа | Возраст | Балл | Зачеты");
+
+        foreach (Student student in result)
+            Console.WriteLine(student.ToString());
+    }
+
+    // Задание 2. Цепочка методов и анонимный тип.
+    static void Task2_MethodSyntax()
+    {
+        List<Student> students = GetStudents();
+
+        var result = students
+            .Where(student => student.GPA > 3.5)
+            .OrderByDescending(student => student.GPA)
+            .Select(student => new
+            {
+                FullName = student.Name,
+                Scholarship = student.GPA >= 4.7 ? "Ректорская"
+                    : student.GPA >= 4.5 ? "Повышенная"
+                    : student.GPA >= 4.0 ? "Стандартная"
+                    : "Нет"
+            });
+
+        Console.WriteLine("\n Задание 2. Стипендии");
+
+        foreach (var student in result)
+            Console.WriteLine(
+                $"{student.FullName}: {student.Scholarship}");
+    }
+
+    // Задание 3. Группировка, среднее значение и поиск.
+    static void Task3_Aggregation()
+    {
+        List<Student> students = GetStudents();
+
+        var groups = students
+            .GroupBy(student => student.Group)
+            .OrderBy(group => group.Key)
+            .Select(group => new
+            {
+                GroupName = group.Key,
+                AverageGPA = group.Average(student => student.GPA)
+            });
+
+        Console.WriteLine("\nЗадание 3. Статистика");
+
+        foreach (var group in groups)
+            Console.WriteLine(
+                $"Группа {group.GroupName}: " +
+                $"Средний балл {group.AverageGPA:F2}");
+
+        Student? found = students
+            .Where(student => student.PassedCredits == 45)
+            .OrderByDescending(student => student.Age)
+            .FirstOrDefault();
+
+        if (found != null)
+            Console.WriteLine(
+                $"Студент с 45 зачетами: {found.Name} " +
+                $"({found.Age} год)");
+        else
+            Console.WriteLine("Студент с 45 зачетами не найден.");
+    }
+
+    // Задание 4. Создание, сохранение и чтение XML.
+    static void Task4_Xml()
+    {
+        XDocument document = new XDocument(
+            new XElement("university",
+                new XElement("course",
+                    new XAttribute("name", "Программирование"),
+
+                    new XElement("student",
+                        new XAttribute("name", "Кирилл"),
+                        new XAttribute("gpa", 3.9)),
+
+                    new XElement("student",
+                        new XAttribute("name", "Лариса"),
+                        new XAttribute("gpa", 4.7)),
+
+                    new XElement("student",
+                        new XAttribute("name", "Михаил"),
+                        new XAttribute("gpa", 3.2)),
+
+                    new XElement("student",
+                        new XAttribute("name", "Наталья"),
+                        new XAttribute("gpa", 4.1))
+                )
+            )
+        );
+
+        document.Save("uni.xml");
+
+        XDocument xmlDoc = XDocument.Load("uni.xml");
+
+        var result =
+            from student in xmlDoc.Descendants("student")
+            where (double)student.Attribute("gpa")! > 4.0
+            select (string)student.Attribute("name")!;
+
+        Console.WriteLine("\nЗадание 4. Отличники из XML");
+
+        foreach (string name in result)
+            Console.WriteLine(name);
+    }
+}
